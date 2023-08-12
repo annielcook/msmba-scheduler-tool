@@ -1,66 +1,97 @@
-import {currentAcademicYear, hourFormat, seasCoursesListURL, seasCoursesScheduleURL} from "./Consts";
-import moment from "moment";
+import {
+    currentAcademicYear,
+    seasCoursesListURL,
+    seasCoursesScheduleURL
+} from "./Consts";
 import getTimeText from "./CoursesTimeText";
-import {getJson} from "./IO";
+import {
+    getJson
+} from "./IO";
 
 const days = {
-    M: 0,
-    T: 1,
-    W: 2,
-    R: 3,
-    F: 4,
+    MON: 0,
+    TUE: 1,
+    WED: 2,
+    THU: 3,
+    FRI: 4,
 }
 
 function getCompleteRawCoursesInfo(rawCoursesList, rawCoursesSchedule) {
     let completeCoursesMap = {};
     for (const courseInfo of rawCoursesList) {
-        completeCoursesMap[courseInfo.courseNumber] = {...courseInfo};
+        completeCoursesMap[courseInfo.catalogNumber] = {
+            ...courseInfo
+        };
     }
-    for (const courseTimes of rawCoursesSchedule) {
-        if (courseTimes.courseNumber in completeCoursesMap) {
-            completeCoursesMap[courseTimes.courseNumber].semesterTimes = [...courseTimes.semesters];
-            completeCoursesMap[courseTimes.courseNumber].isUndergraduate = courseTimes.isUndergraduate;
+    for (const courseTimeslot of rawCoursesSchedule) {
+        const prefix = courseTimeslot.coursePrefix;
+        for (const course of courseTimeslot.courses) {
+            const catalogNumber = `${prefix} ${course.courseNumber}`;
+            if (catalogNumber in completeCoursesMap) {
+                if (completeCoursesMap[catalogNumber].semesterTimes) {
+                    // Add additional weekdays
+                    const daysOffered = completeCoursesMap[catalogNumber].semesterTimes[0].weekday;
+                    completeCoursesMap[catalogNumber].semesterTimes[0].weekday = [...daysOffered, courseTimeslot.weekday];
+                } else {
+                    let semesterTime = {
+                        ...courseTimeslot,
+                        weekday: [courseTimeslot.weekday],
+                        catalogNumber: catalogNumber,
+                        term: parseInt(courseTimeslot.id.slice(-4)) === currentAcademicYear ? "SPRING" : "FALL",
+                    };
+                    delete semesterTime.courses;
+
+                    completeCoursesMap[catalogNumber].semesterTimes = [semesterTime];
+                }
+
+                completeCoursesMap[catalogNumber].isUndergraduate = course.isUndergraduate;
+            }
         }
     }
     return Object.values(completeCoursesMap).filter(e => ("semesterTimes" in e));
 }
 
 function getRelevantSemestersInfo(courseData) {
-    let semestersInfo = [
-        {year: currentAcademicYear, term: "Fall", instructors: [], times: []},
-        {year: currentAcademicYear + 1, term: "Spring", instructors: [], times: []},
-    ];
-    const instructorsFall = courseData.semesters.filter(e =>
-        (e.offeredStatus === "Yes" && e.academicYear === semestersInfo[0].year && e.term === semestersInfo[0].term));
-    const instructorsSpring = courseData.semesters.filter(e =>
-        (e.offeredStatus === "Yes" && e.academicYear === semestersInfo[1].year && e.term === semestersInfo[1].term));
-    const timesFall = courseData.semesterTimes.filter(e =>
-        (e.academicYear === semestersInfo[0].year && e.term === semestersInfo[0].term));
-    const timesSpring = courseData.semesterTimes.filter(e =>
-        (e.academicYear === semestersInfo[1].year && e.term === semestersInfo[1].term));
+    let semestersInfo = [{
+        term: "FALL",
+        instructors: [],
+        times: []
+    }, {
+        term: "SPRING",
+        instructors: [],
+        times: []
+    }, ];
 
-    if (instructorsFall.length > 0 && timesFall.length > 0) {
-        semestersInfo[0].instructors = instructorsFall[0].instructors;
-        semestersInfo[0].times = timesFall[0].times;
+    const instructorsFall = courseData.semesters.filter(e =>
+        (e.instance.faculty.length !== 0 && parseInt(e.academicYear) === currentAcademicYear && e.term === semestersInfo[0].term));
+    const instructorsSpring = courseData.semesters.filter(e =>
+        (e.instance.faculty.length !== 0 && parseInt(e.academicYear) === currentAcademicYear && e.term === semestersInfo[1].term));
+
+    if (instructorsFall.length > 0) {
+        semestersInfo[0].instructors = instructorsFall[0].instance.faculty;
+        semestersInfo[0].times = [courseData.semesterTimes[0]];
     }
 
-    if (instructorsSpring.length > 0 && timesSpring.length > 0) {
-        semestersInfo[1].instructors = instructorsSpring[0].instructors;
-        semestersInfo[1].times = timesSpring[0].times;
+
+    if (instructorsSpring.length > 0) {
+        semestersInfo[1].instructors = instructorsSpring[0].instance.faculty;
+        semestersInfo[1].times = [courseData.semesterTimes[0]];
     }
 
     return semestersInfo.filter(e => (e.instructors.length > 0));
 }
 
 function instructorsToString(instructorsList) {
-    return instructorsList.map((instructor) => (`${instructor.firstName} ${instructor.lastName}`)).join(', ');
+    return instructorsList.map((instructor) => (`${instructor.displayName}`)).join(', ');
 }
 
 function parseTimes(timesList) {
     return timesList.map((time) => {
-        const startHour = moment.utc(time.startTime*60*1000).format(hourFormat);
-        const endHour = moment.utc(time.endTime*60*1000).format(hourFormat);
-        return time.days.split("").map((day) => {
+        const startHour = `${time.startHour < 10 ? "0" + time.startHour : time.startHour}
+                            :${time.startMinute === 0 ? "00" : time.startMinute}`.replace(/[\s\n]/g, '');
+        const endHour = `${time.endHour < 10 ? "0" + time.endHour : time.endHour}
+                        :${time.endMinute === 0 ? "00" : time.endMinute}`.replace(/[\s\n]/g, '');
+        return time.weekday.map((day) => {
             return {
                 day: days[day],
                 startHour: startHour,
@@ -74,15 +105,16 @@ function parseCourse(courseData) {
     const semestersInfos = getRelevantSemestersInfo(courseData);
     return semestersInfos.map((semesterInfo) => {
         const times = parseTimes(semesterInfo.times);
-        return {
-            id: `SEAS-${semesterInfo.term}-${courseData.courseNumber.replace(' ', '-')}`,
-            name: `${courseData.courseNumber} ${courseData.title}`,
+        const course = {
+            id: `SEAS-${semesterInfo.term}-${courseData.catalogNumber.replace(' ', '-')}`,
+            name: `${courseData.catalogNumber} ${courseData.title}`,
             school: "SEAS",
             prof: instructorsToString(semesterInfo.instructors),
             timeText: getTimeText(times),
-            semester: semesterInfo.term.slice(0,1),
+            semester: semesterInfo.term.slice(0, 1),
             times: times
         };
+        return course;
     });
 }
 
@@ -98,5 +130,7 @@ export function getSEASCoursesFromJsons(coursesListJson, coursesScheduleJson) {
 }
 
 export const exportedForTesting = {
-    parseCourse, getCompleteRawCoursesInfo, getRelevantSemestersInfo
+    parseCourse,
+    getCompleteRawCoursesInfo,
+    getRelevantSemestersInfo
 };
